@@ -94,7 +94,7 @@ class TurboSmsChannel
         }
 
         $envelopeCode = (int) ($payload['response_code'] ?? -1);
-        if ($envelopeCode !== 0) {
+        if (! $this->isSuccessCode($envelopeCode)) {
             Log::warning('TurboSms envelope error', [
                 'recipient' => $recipient,
                 'response_code' => $envelopeCode,
@@ -106,7 +106,7 @@ class TurboSmsChannel
 
         foreach ($payload['response_result'] ?? [] as $result) {
             $code = (int) ($result['response_code'] ?? -1);
-            if ($code !== 0) {
+            if (! $this->isSuccessCode($code)) {
                 Log::warning('TurboSms recipient error', [
                     'phone' => $result['phone'] ?? null,
                     'response_code' => $code,
@@ -126,5 +126,10 @@ class TurboSmsChannel
     private function normalizePhone(string $phone): string
     {
         return preg_replace('/\D+/', '', $phone) ?? '';
+    }
+
+    private function isSuccessCode(int $code): bool
+    {
+        return $code === 0 || ($code >= 800 && $code < 900);
     }
 }
