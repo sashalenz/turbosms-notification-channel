@@ -93,9 +93,15 @@ class TurboSmsChannel
             return;
         }
 
+        // Envelope and per-recipient codes are operational signals from the
+        // SMS gateway (bad recipient, balance, blacklist, …) — not faults in
+        // this channel. Log at notice so Laravel keeps the trail but
+        // Bugsnag's PSR logger (default threshold = warning) ignores them.
+        // Transport / auth / HTTP errors above stay as warning because those
+        // do indicate something worth paging on.
         $envelopeCode = (int) ($payload['response_code'] ?? -1);
         if (! $this->isSuccessCode($envelopeCode)) {
-            Log::warning('TurboSms envelope error', [
+            Log::notice('TurboSms envelope error', [
                 'recipient' => $recipient,
                 'response_code' => $envelopeCode,
                 'response_status' => $payload['response_status'] ?? null,
@@ -107,7 +113,7 @@ class TurboSmsChannel
         foreach ($payload['response_result'] ?? [] as $result) {
             $code = (int) ($result['response_code'] ?? -1);
             if (! $this->isSuccessCode($code)) {
-                Log::warning('TurboSms recipient error', [
+                Log::notice('TurboSms recipient error', [
                     'phone' => $result['phone'] ?? null,
                     'response_code' => $code,
                     'response_status' => $result['response_status'] ?? null,
