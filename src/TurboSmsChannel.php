@@ -6,10 +6,18 @@ namespace Sashalenz\TurboSms;
 
 use Throwable;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Event;
+use Sashalenz\TurboSms\Events\SmsDispatched;
 use Illuminate\Notifications\Notification;
 
 class TurboSmsChannel
 {
+    public const STATUS_SENT = 'sent';
+
+    public const STATUS_FAILED = 'failed';
+
+    public const STATUS_SANDBOX = 'sandbox';
+
     public function __construct(
         private readonly ?string $apiKey,
         private readonly ?string $sender,
@@ -37,6 +45,14 @@ class TurboSmsChannel
             return;
         }
 
+        $sentBody = [
+            'recipients' => [$recipient],
+            'sms' => [
+                'sender' => (string) $this->sender,
+                'text' => $message->body,
+            ],
+        ];
+
         if ($this->sandboxMode) {
             if ($this->debug) {
                 Log::info('TurboSms [sandbox] would send', [
@@ -45,6 +61,15 @@ class TurboSmsChannel
                     'body' => $message->body,
                 ]);
             }
+
+            $this->emit(
+                notifiable: $notifiable,
+                notification: $notification,
+                phone: $recipient,
+                text: $message->body,
+                status: self::STATUS_SANDBOX,
+                requestPayload: $sentBody,
+            );
 
             return;
         }
@@ -55,18 +80,20 @@ class TurboSmsChannel
                 'notification' => $notification::class,
             ]);
 
+            $this->emit(
+                notifiable: $notifiable,
+                notification: $notification,
+                phone: $recipient,
+                text: $message->body,
+                status: self::STATUS_FAILED,
+                requestPayload: $sentBody,
+                errorReason: 'api_key or sender not configured',
+            );
+
             return;
         }
 
         $client = new TurboSmsClient($this->apiKey, $this->baseUrl, $this->timeout);
-
-        $sentBody = [
-            'recipients' => [$recipient],
-            'sms' => [
-                'sender' => $this->sender,
-                'text' => $message->body,
-            ],
-        ];
 
         try {
             $response = $client->send($sentBody);
@@ -78,16 +105,38 @@ class TurboSmsChannel
                 'sent_body' => $sentBody,
             ]);
 
+            $this->emit(
+                notifiable: $notifiable,
+                notification: $notification,
+                phone: $recipient,
+                text: $message->body,
+                status: self::STATUS_FAILED,
+                requestPayload: $sentBody,
+                errorReason: 'transport: '.$exception->getMessage(),
+            );
+
             return;
         }
 
         $payload = $response->json();
+        $payloadArray = is_array($payload) ? $payload : null;
 
         if ($response->status() === 401 || $response->status() === 403) {
             Log::warning('TurboSms auth error — check TURBOSMS_API_KEY', [
                 'status' => $response->status(),
                 'body' => $payload,
             ]);
+
+            $this->emit(
+                notifiable: $notifiable,
+                notification: $notification,
+                phone: $recipient,
+                text: $message->body,
+                status: self::STATUS_FAILED,
+                requestPayload: $sentBody,
+                responsePayload: $payloadArray,
+                errorReason: 'auth: HTTP '.$response->status(),
+            );
 
             return;
         }
@@ -100,6 +149,17 @@ class TurboSmsChannel
                 'sent_body' => $sentBody,
             ]);
 
+            $this->emit(
+                notifiable: $notifiable,
+                notification: $notification,
+                phone: $recipient,
+                text: $message->body,
+                status: self::STATUS_FAILED,
+                requestPayload: $sentBody,
+                responsePayload: $payloadArray,
+                errorReason: 'http: '.$response->status(),
+            );
+
             return;
         }
 
@@ -111,8 +171,9 @@ class TurboSmsChannel
         // the exact JSON we POSTed so a future investigation can prove the
         // payload format end-to-end without re-deriving it from the channel.
         $envelopeCode = (int) ($payload['response_code'] ?? -1);
+        $envelopeStatus = $payload['response_status'] ?? null;
+
         if (! $this->isSuccessCode($envelopeCode)) {
-            $envelopeStatus = $payload['response_status'] ?? null;
             Log::warning('TurboSms envelope error', [
                 'title' => 'TurboSms envelope: '.($envelopeStatus ?? 'code '.$envelopeCode),
                 'recipient' => $recipient,
@@ -120,6 +181,18 @@ class TurboSmsChannel
                 'response_status' => $envelopeStatus,
                 'sent_body' => $sentBody,
             ]);
+
+            $this->emit(
+                notifiable: $notifiable,
+                notification: $notification,
+                phone: $recipient,
+                text: $message->body,
+                status: self::STATUS_FAILED,
+                requestPayload: $sentBody,
+                responsePayload: $payloadArray,
+                envelopeCode: $envelopeCode,
+                errorReason: 'envelope: '.($envelopeStatus !== null ? (string) $envelopeStatus : (string) $envelopeCode),
+            );
 
             return;
         }
@@ -137,12 +210,67 @@ class TurboSmsChannel
             }
         }
 
+        $firstResult = $payload['response_result'][0] ?? null;
+        $recipientCode = $firstResult !== null ? (int) ($firstResult['response_code'] ?? -1) : null;
+        $recipientStatus = $firstResult !== null && isset($firstResult['response_status'])
+            ? (string) $firstResult['response_status']
+            : null;
+        $messageId = $firstResult !== null && isset($firstResult['message_id'])
+            ? (string) $firstResult['message_id']
+            : null;
+
+        $sentSuccessfully = $recipientCode !== null && $this->isSuccessCode($recipientCode);
+
+        $this->emit(
+            notifiable: $notifiable,
+            notification: $notification,
+            phone: $recipient,
+            text: $message->body,
+            status: $sentSuccessfully ? self::STATUS_SENT : self::STATUS_FAILED,
+            requestPayload: $sentBody,
+            responsePayload: $payloadArray,
+            envelopeCode: $envelopeCode,
+            recipientCode: $recipientCode,
+            gatewayMessageId: $sentSuccessfully ? $messageId : null,
+            errorReason: $sentSuccessfully
+                ? null
+                : 'recipient: '.($recipientStatus ?? ($recipientCode !== null ? (string) $recipientCode : 'unknown')),
+        );
+
         if ($this->debug) {
             Log::info('TurboSms sent', [
                 'recipient' => $recipient,
                 'response' => $payload,
             ]);
         }
+    }
+
+    private function emit(
+        object $notifiable,
+        Notification $notification,
+        string $phone,
+        string $text,
+        string $status,
+        ?array $requestPayload = null,
+        ?array $responsePayload = null,
+        ?int $envelopeCode = null,
+        ?int $recipientCode = null,
+        ?string $gatewayMessageId = null,
+        ?string $errorReason = null,
+    ): void {
+        Event::dispatch(new SmsDispatched(
+            notifiable: $notifiable,
+            notification: $notification,
+            phone: $phone,
+            text: $text,
+            status: $status,
+            requestPayload: $requestPayload,
+            responsePayload: $responsePayload,
+            envelopeCode: $envelopeCode,
+            recipientCode: $recipientCode,
+            gatewayMessageId: $gatewayMessageId,
+            errorReason: $errorReason,
+        ));
     }
 
     private function normalizePhone(string $phone): string

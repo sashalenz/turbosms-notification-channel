@@ -36,5 +36,21 @@ class TurboSmsServiceProvider extends PackageServiceProvider
                 timeout: (int) ($options['timeout'] ?? 10),
             );
         });
+
+        // Reusable client for status-polling — host apps inject this into
+        // their own commands instead of building the HTTP client themselves.
+        $this->app->bind(TurboSmsClient::class, static function (Application $app): TurboSmsClient {
+            /** @var Repository $config */
+            $config = $app->make('config');
+
+            /** @var array<string, mixed> $options */
+            $options = (array) $config->get('turbosms', []);
+
+            return new TurboSmsClient(
+                apiKey: (string) ($options['api_key'] ?? ''),
+                baseUrl: (string) ($options['base_url'] ?? 'https://api.turbosms.ua'),
+                timeout: (int) ($options['timeout'] ?? 10),
+            );
+        });
     }
 }
