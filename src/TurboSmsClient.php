@@ -16,15 +16,12 @@ class TurboSmsClient
         private readonly int $timeout,
     ) {}
 
-    public function send(string $sender, string $recipient, string $text): Response
+    /**
+     * @param  array<string, mixed>  $payload
+     */
+    public function send(array $payload): Response
     {
-        return $this->http()->post('/message/send.json', [
-            'recipients' => [$recipient],
-            'sms' => [
-                'sender' => $sender,
-                'text' => $text,
-            ],
-        ]);
+        return $this->http()->post('/message/send.json', $payload);
     }
 
     private function http(): PendingRequest

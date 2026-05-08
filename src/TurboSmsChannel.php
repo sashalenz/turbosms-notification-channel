@@ -60,13 +60,22 @@ class TurboSmsChannel
 
         $client = new TurboSmsClient($this->apiKey, $this->baseUrl, $this->timeout);
 
+        $sentBody = [
+            'recipients' => [$recipient],
+            'sms' => [
+                'sender' => $this->sender,
+                'text' => $message->body,
+            ],
+        ];
+
         try {
-            $response = $client->send($this->sender, $recipient, $message->body);
+            $response = $client->send($sentBody);
         } catch (Throwable $exception) {
             Log::warning('TurboSms transport error', [
                 'recipient' => $recipient,
                 'notification' => $notification::class,
                 'message' => $exception->getMessage(),
+                'sent_body' => $sentBody,
             ]);
 
             return;
@@ -88,23 +97,28 @@ class TurboSmsChannel
                 'recipient' => $recipient,
                 'status' => $response->status(),
                 'body' => $payload,
+                'sent_body' => $sentBody,
             ]);
 
             return;
         }
 
         // Envelope and per-recipient codes are operational signals from the
-        // SMS gateway (bad recipient, balance, blacklist, …) — not faults in
-        // this channel. Log at notice so Laravel keeps the trail but
-        // Bugsnag's PSR logger (default threshold = warning) ignores them.
-        // Transport / auth / HTTP errors above stay as warning because those
-        // do indicate something worth paging on.
+        // SMS gateway (bad recipient, balance, blacklist, …). They surface to
+        // Bugsnag at warning level; `context.title` carries the gateway-side
+        // `response_status` so Bugsnag groups errors by reason rather than
+        // collapsing every gateway issue into one bucket. `sent_body` carries
+        // the exact JSON we POSTed so a future investigation can prove the
+        // payload format end-to-end without re-deriving it from the channel.
         $envelopeCode = (int) ($payload['response_code'] ?? -1);
         if (! $this->isSuccessCode($envelopeCode)) {
-            Log::notice('TurboSms envelope error', [
+            $envelopeStatus = $payload['response_status'] ?? null;
+            Log::warning('TurboSms envelope error', [
+                'title' => 'TurboSms envelope: '.($envelopeStatus ?? 'code '.$envelopeCode),
                 'recipient' => $recipient,
                 'response_code' => $envelopeCode,
-                'response_status' => $payload['response_status'] ?? null,
+                'response_status' => $envelopeStatus,
+                'sent_body' => $sentBody,
             ]);
 
             return;
@@ -113,10 +127,12 @@ class TurboSmsChannel
         foreach ($payload['response_result'] ?? [] as $result) {
             $code = (int) ($result['response_code'] ?? -1);
             if (! $this->isSuccessCode($code)) {
-                Log::notice('TurboSms recipient error', [
+                $status = $result['response_status'] ?? null;
+                Log::warning('TurboSms recipient error', [
+                    'title' => 'TurboSms recipient: '.($status ?? 'code '.$code),
                     'phone' => $result['phone'] ?? null,
                     'response_code' => $code,
-                    'response_status' => $result['response_status'] ?? null,
+                    'response_status' => $status,
                 ]);
             }
         }
